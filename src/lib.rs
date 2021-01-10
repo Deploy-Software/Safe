@@ -5,32 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize)]
-enum UnencryptedStorageType {
-    Username(String),
-    Link(String),
-}
-
-#[derive(Serialize, Deserialize)]
-enum EncryptedStorageType {
-    Password(String),
+pub struct StorageType {
+    name: String,
+    data: String,
 }
 
 #[derive(Serialize, Deserialize)]
 enum DataType {
-    Encrypted(EncryptedStorageType),
-    Unencrypted(UnencryptedStorageType),
+    Encrypted(StorageType),
+    Unencrypted(StorageType),
 }
 
-#[derive(Serialize, Deserialize)]
-struct Data {
-    name: String,
-    data: DataType,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Item {
-    data: Vec<Data>,
-}
+type Item = Vec<DataType>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Safe {
@@ -43,6 +29,10 @@ pub struct Safe {
 pub enum SafeErrorKind {
     SomethingWrong,
     NotFound,
+    EncryptionError,
+    WrongPassword,
+    HashInvalid,
+    HashToStringFailure,
 }
 
 impl Safe {
@@ -56,13 +46,13 @@ impl Safe {
 
     pub fn new(master_password: String) -> Result<Safe, SafeErrorKind> {
         let config = Config::default();
-        let salt = "randomsalt";
+        let salt = "randomsalt".to_string();
         let hash =
             argon2::hash_encoded(master_password.as_bytes(), salt.as_bytes(), &config).unwrap();
         let encoded = base64::encode_config(&hash, base64::CRYPT);
 
         Ok(Self {
-            salt: String::from("hey"),
+            salt,
             hash: encoded,
             items: HashMap::new(),
         })
@@ -80,16 +70,36 @@ impl Safe {
         Aes256Gcm::new(key)
     }
 
-    pub fn encrypt(&self, master_password: &str, local_password: &str) -> String {
+    fn encrypt(&self, master_password: &str, to_encrypt: &str) -> Result<String, SafeErrorKind> {
+        let decoded_hash = match base64::decode_config(&self.hash, base64::CRYPT) {
+            Ok(decoded) => decoded,
+            Err(_error) => return Err(SafeErrorKind::HashInvalid),
+        };
+        let decoded_hash_string = match String::from_utf8(decoded_hash) {
+            Ok(string) => string,
+            Err(_error) => return Err(SafeErrorKind::HashToStringFailure),
+        };
+        let matches =
+            argon2::verify_encoded(&decoded_hash_string, master_password.as_bytes().as_ref())
+                .unwrap();
+        if !matches {
+            return Err(SafeErrorKind::WrongPassword);
+        }
         let cipher = self.make_cipher(master_password);
         let nonce = GenericArray::from_slice(b"unique nonce"); // 96-bits; unique per message
-        let ciphertext = cipher
-            .encrypt(nonce, local_password.as_bytes().as_ref())
-            .expect("encryption failure!"); // NOTE: handle this error to avoid panics!
-        base64::encode_config(ciphertext.clone(), base64::URL_SAFE_NO_PAD)
+        let ciphertext = match cipher.encrypt(nonce, to_encrypt.as_bytes().as_ref()) {
+            Ok(ciphertext) => ciphertext,
+            Err(_error) => {
+                return Err(SafeErrorKind::EncryptionError);
+            }
+        };
+        Ok(base64::encode_config(
+            ciphertext.clone(),
+            base64::URL_SAFE_NO_PAD,
+        ))
     }
 
-    pub fn decrypt(&self, master_password: &str, hashed: &str) -> String {
+    fn decrypt(&self, master_password: &str, hashed: &str) -> String {
         let cipher = self.make_cipher(master_password);
         let nonce = GenericArray::from_slice(b"unique nonce"); // 96-bits; unique per message
         let decoded = base64::decode_config(hashed, base64::URL_SAFE_NO_PAD).unwrap();
@@ -101,12 +111,24 @@ impl Safe {
     }
 
     pub fn new_item(&mut self, title: String) -> Result<(), SafeErrorKind> {
-        self.items.insert(title, Item { data: vec![] });
+        self.items.insert(title, vec![]);
         Ok(())
     }
 
-    pub fn new_data(&mut self, title: String) -> Result<(), SafeErrorKind> {
-        if let Some(_item) = self.items.get(&title) {
+    pub fn add_encrypted_data(
+        &mut self,
+        master_password: String,
+        title: String,
+        data_name: String,
+        data_value: String,
+    ) -> Result<(), SafeErrorKind> {
+        let encrypted_value = self.encrypt(&master_password, &data_value)?;
+        if let Some(item) = self.items.get_mut(&title) {
+            let new_item = DataType::Encrypted(StorageType {
+                name: data_name,
+                data: encrypted_value,
+            });
+            item.push(new_item);
             Ok(())
         } else {
             Err(SafeErrorKind::NotFound)

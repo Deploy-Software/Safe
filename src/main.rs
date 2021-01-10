@@ -23,7 +23,15 @@ fn main() {
 
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
-    let safe = Safe::from(contents).unwrap();
+    let mut safe = Safe::from(contents).unwrap();
+    safe.new_item("Facebook".to_string()).unwrap();
+    safe.add_encrypted_data(
+        MASTER_PASSWORD.to_string(),
+        "Facebook".to_string(),
+        "password".to_string(),
+        "John Doe".to_string(),
+    )
+    .unwrap();
     let output = safe.json().unwrap();
     println!("{}", output);
     //let hash = encrypt(master_password, salt, "heyo");
